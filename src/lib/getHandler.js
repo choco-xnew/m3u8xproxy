@@ -39,19 +39,18 @@ export default function getHandler(options, proxy) {
     ) {
       corsAnywhere.requireHeader = null;
     } else {
-      corsAnywhere.requireHeader = corsAnywhere.requireHeader.map(function (
-        headerName
-      ) {
-        return headerName.toLowerCase();
-      });
+      corsAnywhere.requireHeader = corsAnywhere.requireHeader.map(h =>
+        h.toLowerCase()
+      );
     }
   }
+
   const hasRequiredHeaders = function (headers) {
     return (
       !corsAnywhere.requireHeader ||
-      corsAnywhere.requireHeader.some(function (headerName) {
-        return Object.hasOwnProperty.call(headers, headerName);
-      })
+      corsAnywhere.requireHeader.some(h =>
+        Object.hasOwnProperty.call(headers, h)
+      )
     );
   };
 
@@ -63,9 +62,26 @@ export default function getHandler(options, proxy) {
     };
 
     const cors_headers = withCORS({}, req);
+
+    // OPTIONS preflight
     if (req.method === "OPTIONS") {
       res.writeHead(200, cors_headers);
       res.end();
+      return;
+    }
+
+    const __filename = fileURLToPath(import.meta.url);
+    const __dirname = dirname(__filename);
+
+    /* =====================================================
+       🔓 FREE ACCESS ZONE (NO CORS / NO ORIGIN CHECK)
+       ===================================================== */
+    if (req.url === "/" || req.url === "/index.html") {
+      res.writeHead(200, {
+        "Content-Type": "text/html",
+        "Access-Control-Allow-Origin": "*",
+      });
+      res.end(readFileSync(join(__dirname, "../index.html")));
       return;
     }
 
@@ -86,8 +102,6 @@ export default function getHandler(options, proxy) {
         );
         return;
       }
-      const __filename = fileURLToPath(import.meta.url);
-      const __dirname = dirname(__filename);
 
       res.end(readFileSync(join(__dirname, "../index.html")));
       return;
@@ -106,7 +120,8 @@ export default function getHandler(options, proxy) {
     }
 
     if (!/^\/https?:/.test(req.url) && !isValidHostName(location.hostname)) {
-      const uri = new URL(req.url ?? web_server_url, "http://localhost:3000");
+      const uri = new URL(req.url, "http://localhost");
+
       if (uri.pathname === "/m3u8-proxy") {
         let headers = {};
         try {
@@ -116,9 +131,10 @@ export default function getHandler(options, proxy) {
           res.end(e.message);
           return;
         }
-        const url = uri.searchParams.get("url");
-        return proxyM3U8(url ?? "", headers, res);
-      } else if (uri.pathname === "/ts-proxy") {
+        return proxyM3U8(uri.searchParams.get("url") ?? "", headers, res);
+      }
+
+      if (uri.pathname === "/ts-proxy") {
         let headers = {};
         try {
           headers = JSON.parse(uri.searchParams.get("headers") ?? "{}");
@@ -127,16 +143,22 @@ export default function getHandler(options, proxy) {
           res.end(e.message);
           return;
         }
-        const url = uri.searchParams.get("url");
-        return proxyTs(url ?? "", headers, req, res);
-      } else if (uri.pathname === "/") {
-        return res.end(readFileSync(join(__dirname, "../index.html")));
-      } else {
-        res.writeHead(404, "Invalid host", cors_headers);
-        res.end("Invalid host: " + location.hostname);
-        return;
+        return proxyTs(
+          uri.searchParams.get("url") ?? "",
+          headers,
+          req,
+          res
+        );
       }
+
+      res.writeHead(404, "Invalid host", cors_headers);
+      res.end("Invalid host: " + location.hostname);
+      return;
     }
+
+    /* =====================
+       🔒 CORS SECURITY ZONE
+       ===================== */
 
     if (!hasRequiredHeaders(req.headers)) {
       res.writeHead(400, "Header required", cors_headers);
@@ -148,26 +170,19 @@ export default function getHandler(options, proxy) {
     }
 
     const origin = req.headers.origin || "";
-    if (corsAnywhere.originBlacklist.indexOf(origin) >= 0) {
+
+    if (corsAnywhere.originBlacklist.includes(origin)) {
       res.writeHead(403, "Forbidden", cors_headers);
-      res.end(
-        'The origin "' +
-          origin +
-          '" was blacklisted by the operator of this proxy.'
-      );
+      res.end(`The origin "${origin}" was blacklisted.`);
       return;
     }
 
     if (
       corsAnywhere.originWhitelist.length &&
-      corsAnywhere.originWhitelist.indexOf(origin) === -1
+      !corsAnywhere.originWhitelist.includes(origin)
     ) {
       res.writeHead(403, "Forbidden", cors_headers);
-      res.end(
-        'The origin "' +
-          origin +
-          '" was not whitelisted by the operator of this proxy.'
-      );
+      res.end(`The origin "${origin}" was not whitelisted.`);
       return;
     }
 
@@ -175,41 +190,21 @@ export default function getHandler(options, proxy) {
       corsAnywhere.checkRateLimit && corsAnywhere.checkRateLimit(origin);
     if (rateLimitMessage) {
       res.writeHead(429, "Too Many Requests", cors_headers);
-      res.end(
-        'The origin "' +
-          origin +
-          '" has sent too many requests.\n' +
-          rateLimitMessage
-      );
-      return;
-    }
-
-    if (
-      corsAnywhere.redirectSameOrigin &&
-      origin &&
-      location.href[origin.length] === "/" &&
-      location.href.lastIndexOf(origin, 0) === 0
-    ) {
-      cors_headers.vary = "origin";
-      cors_headers["cache-control"] = "private";
-      cors_headers.location = location.href;
-      res.writeHead(301, "Please use a direct request", cors_headers);
-      res.end();
+      res.end(rateLimitMessage);
       return;
     }
 
     const isRequestedOverHttps =
       req.connection.encrypted ||
       /^\s*https/.test(req.headers["x-forwarded-proto"]);
+
     const proxyBaseUrl =
       (isRequestedOverHttps ? "https://" : "http://") + req.headers.host;
 
-    corsAnywhere.removeHeaders.forEach(function (header) {
-      delete req.headers[header];
-    });
+    corsAnywhere.removeHeaders.forEach(h => delete req.headers[h]);
 
-    Object.keys(corsAnywhere.setHeaders).forEach(function (header) {
-      req.headers[header] = corsAnywhere.setHeaders[header];
+    Object.keys(corsAnywhere.setHeaders).forEach(h => {
+      req.headers[h] = corsAnywhere.setHeaders[h];
     });
 
     req.corsAnywhereRequestState.location = location;
